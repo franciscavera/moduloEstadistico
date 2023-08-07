@@ -1,176 +1,171 @@
-package controller
+package model
 
-import (
-	"net/http"
-
-	//"strconv"
-
-	jwt "github.com/appleboy/gin-jwt/v2"
-	"github.com/citiaps/yoinformogral-backend/model"
-	"github.com/citiaps/yoinformogral-backend/util"
-	"github.com/gin-gonic/gin"
-	"github.com/globalsign/mgo/bson"
+import ("github.com/globalsign/mgo/bson"
+"log"
 )
 
-type FormController struct {
+type Form struct {
+	ID        bson.ObjectId          `json:"id" bson:"_id,omitempty"`
+	Title     string                 `json:"title" bson:"title"`
+	Type      map[string]interface{} `json:"type" bson:"type,omitempty"`
+	Questions []interface{}          `json:"questions" bson:"questions,omitempty"`
+	States    []interface{}          `json:"states" bson:"states,omitempty"`
+	Characterization bson.ObjectId `json:"characterization" bson:"characterization,omitempty"`
+	
 }
 
-func (formController *FormController) Routes(base *gin.RouterGroup, authNormal *jwt.GinJWTMiddleware) *gin.RouterGroup {
+func (formModel *Form) FindPaginate(query bson.M, limit int, offset int) ([]Form, error) {
 
-	formRouter := base.Group("/forms") //, middleware.SetRoles(RolAdmin, RolUser), authNormal.MiddlewareFunc())
-	{
-
-		formRouter.POST("", authNormal.MiddlewareFunc(), formController.Create())
-		formRouter.GET("/:id", formController.One())
-		formRouter.GET("", formController.GetAll())
-		//formRouter.GET("/:id", formController.GetQuestionCharacterizationByIdForm())
-		
+	col, session := GetCollection(CollectionNameForm)
+	defer session.Close()
+	pag := []bson.M{{"$skip": offset}}
+	if limit > 0 {
+		pag = append(pag, bson.M{"$limit": limit})
 	}
-	base.GET("/question-characterization/:id", formController.GetQuestionCharacterizationByIdForm())
-	base.GET("/questionsForm/:id", formController.GetQuestionsByIdForm())
-	return formRouter
-}
-
-func (formController *FormController) GetAll() func(c *gin.Context) {
-
-	return func(c *gin.Context) {
-		pagination := PaginationParams{}
-		err := c.ShouldBind(&pagination)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, util.GetError("No se puedieron encontrar los parametros limit, offset", err))
-			return
-		}
-
-		page, err := formModel.FindPaginate(bson.M{}, pagination.Limit, pagination.Offset)
-
-		if err != nil {
-			c.JSON(http.StatusNotFound, util.GetError("No se pudo obtener la lista de formularios", err))
-		}
-
-		// if len(page.Metadata) != 0 {
-		// 	c.Header("Pagination-Count", fmt.Sprintf("%d", page.Metadata[0]["total"]))
-		// }
-
-		c.JSON(http.StatusOK, page)
+	pipeline := []bson.M{
+		bson.M{"$match": query},
+		// bson.M{"$facet": bson.M{
+		// 	"metadata": []bson.M{{"$count": "total"}},
+		// 	"data":     pag, // add projection here wish you re-shape the docs
+		// }},
 	}
+
+	// pageDoc := Page{}
+	pageDoc := []Form{}
+	err := col.Pipe(pipeline).All(&pageDoc)
+
+	return pageDoc, err
 }
 
-func (formController *FormController) Create() func(c *gin.Context) {
-	return func(c *gin.Context) {
+func (formModel *Form) Create(formDoc *Form) error {
+	col, session := GetCollection(CollectionNameForm)
+	defer session.Close()
+	formDoc.ID = bson.NewObjectId()
+	err := col.Insert(formDoc)
 
-		// Traer Usuario
-		var form model.Form
-		err := c.Bind(&form)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, util.GetError("No se pudo decodificar json", err))
-			return
-		}
+	return err
+}
 
-		err = formModel.Create(&form)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, util.GetError("No se pudo insertar perro", err))
-			return
-		}
+func (formModel *Form) FindByField(query bson.M) (*Form, error) {
+	col, session := GetCollection(CollectionNameForm)
+	defer session.Close()
+	var formDoc Form
+	err := col.Find(query).One(&formDoc)
 
-		c.JSON(http.StatusOK, form)
+	return &formDoc, err
+}
+func (formModel *Form) Get(id string) (*Form, error) {
+	col, session := GetCollection(CollectionNameForm)
+	defer session.Close()
+	var formDoc Form
+	err := col.FindId(bson.ObjectIdHex(id)).One(&formDoc)
+
+	return &formDoc, err
+}
+
+//Si se hace esta consulta directamente en la base de datos es con un Agreggate, acá se utiliza un pipeline.
+//Entrada: query 
+/*Funcionamiento: Busca todas las preguntas de un formulario que el atributo "isCharacterizaton == true"*/
+//Salida: Arreglo con las preguntas, cada pregunta trae su index, type,subtitle, sentence, values
+func (formModel *Form) QuestionCharacterizationByIdForm(query bson.M) ([]bson.M, error) {
+	col, session := GetCollection(CollectionNameForm)
+	defer session.Close()
+
+	// Definición de Pipeline (Aggregate)
+	pipeline := []bson.M{
+		{
+			"$match": query,
+		},
+		bson.M{"$unwind": "$questions"},
+		bson.M{
+			"$match": bson.M{
+				"questions.isCharacterization": true,
+			},
+		},
+		bson.M{
+			"$project": bson.M{
+				"_id":       0,
+				"type":      "$questions.type",
+				"name":		 "$questions.name",
+				"umedida":   "$questions.umedida",
+				"index":     "$questions.index",
+				"subtitle":  "$questions.subtitle",
+				"sentence":  "$questions.sentence",
+				"values": bson.M{
+					"$map": bson.M{
+						"input": "$questions.options",
+						"as":    "option",
+						"in":    "$$option.value",
+					},
+				},
+				"texts": bson.M{
+					"$map": bson.M{
+						"input": "$questions.options",
+						"as":    "option",
+						"in":    "$$option.text",
+					},
+				},
+			},
+		},
 	}
+
+	groupForms := []bson.M{}
+	err := col.Pipe(pipeline).All(&groupForms)
+	log.Printf("pipe: %+v", pipeline)
+	return groupForms, err
 }
-//Para obtener solo un fomrulario por su id
-func (formController *FormController) One() func(c *gin.Context) {
-	return func(c *gin.Context) {
 
-		id := c.Param("id")
-		if id == "" {
-			c.JSON(http.StatusNotFound, util.GetError("No se encuentra parametro :id", nil))
-			return
-		}
-		if !bson.IsObjectIdHex(id) {
-			c.JSON(http.StatusNotFound, util.GetError("No se pudo recibir parámetro", nil))
-			return
-		}
-		group, err := formModel.Get(id)
-		if err != nil {
-			c.JSON(http.StatusNotFound, util.GetError("No se encontró el formulario", err))
-			return
-		}
-		// Times resolved
-		userQuery := c.Query("user")
-		if userQuery != "" && userQuery != "undefined" {
-			user, err := userModel.FindOne(bson.M{
-				"_id": bson.ObjectIdHex(userQuery),
-			})
-			if err != nil {
-				c.JSON(http.StatusServiceUnavailable, util.GetError("Error", err))
-				return
-			}
-			count, err := reportModel.Count(bson.M{
-				"user": user.ID,
-			})
-			if err != nil {
-				c.JSON(http.StatusServiceUnavailable, util.GetError("Error", err))
-				return
-			}
-			if count >= 10 {
-				c.JSON(http.StatusConflict, util.GetError("Solo se puede responder", err))
-				return
-			}
-		}
+//Entrada: query 
+/*Funcionamiento: se hace un pipeline, donde el primer paso es hacer match con la query,
+la query es "query["_id"] = bson.ObjectIdHex(id)", se separan las preguntas y luego se hace match con 
+todas las preguntas que isQuestion== true y que no sean de tipo text ni open, luego se agrupan y se indica que valores queremos, finalmente
+se hace una proyeccion*/
+//Salida: Arreglo con las preguntas, incluye su index, type y subtitle
+func (formModel *Form) QuestionsAll(query bson.M) ([]bson.M, error) {
+	col, session := GetCollection(CollectionNameForm)
+	defer session.Close()
 
-		c.JSON(http.StatusOK, group)
+	// Definición de Pipeline (Aggregate)
+	pipeline := []bson.M{
+		{
+			"$match": query,
+		},
+		{"$unwind": "$questions"},
+		{
+			"$match": bson.M{
+				"questions.isQuestion": true,
+			},
+		},
+		bson.M{
+			"$project": bson.M{
+				"_id":       0,
+				"type":      "$questions.type",
+				"name":		 "$questions.name",
+				"index":     "$questions.index",
+				"subtitle":  "$questions.subtitle",
+				"umedida":   "$questions.umedida",
+				"sentence":  "$questions.sentence",
+				"values": bson.M{
+					"$map": bson.M{
+						"input": "$questions.options",
+						"as":    "option",
+						"in":    "$$option.value",
+					},
+				},
+				"texts": bson.M{
+					"$map": bson.M{
+						"input": "$questions.options",
+						"as":    "option",
+						"in":    "$$option.text",
+					},
+				},
+			},
+		},
 	}
+	groupQuestions := []bson.M{}
+	err := col.Pipe(pipeline).All(&groupQuestions)
+	log.Printf("pipe: %+v", pipeline)
+	return groupQuestions, err
+
 }
 
-/*Se recibe el parameto id (id del formulario), con eso se encuentra el formulario y se obtienen las preguntas de 
-caracterizacíon
-*/
-func (formController *FormController) GetQuestionCharacterizationByIdForm() func(c *gin.Context) {
-	return func(c *gin.Context) {
-
-		id := c.Param("id")
-		
-		if id == "" {
-			c.JSON(http.StatusNotFound, util.GetError("No se encuentra parametro :id", nil))
-			return
-		}
-		if !bson.IsObjectIdHex(id) {
-			c.JSON(http.StatusNotFound, util.GetError("No se pudo recibir parámetro", nil))
-			return
-		}
-		query:= bson.M{}
-		query["_id"] = bson.ObjectIdHex(id) 
-		group, err := formModel.QuestionCharacterizationByIdForm(query)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, util.GetError("No se pudieron obtener las preguntas de caracterización", nil))
-			return
-		}
-
-		c.JSON(http.StatusOK , group)
-	}
-}
-/*Se recibe el parameto id (id del formulario), con eso se encuentra el formulario y se obtienen las preguntas asociadas 
-a ese formulario
-*/
-func (formController *FormController) GetQuestionsByIdForm() func(c *gin.Context) {
-	return func(c *gin.Context) {
-
-		id := c.Param("id")
-		
-		if id == "" {
-			c.JSON(http.StatusNotFound, util.GetError("No se encuentra parametro :id", nil))
-			return
-		}
-		if !bson.IsObjectIdHex(id) {
-			c.JSON(http.StatusNotFound, util.GetError("No se pudo recibir parámetro", nil))
-			return
-		}
-		query:= bson.M{}
-		query["_id"] = bson.ObjectIdHex(id) 
-		group, err := formModel.QuestionsAll(query)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, util.GetError("No se pudieron obtener las preguntas de caracterización", nil))
-			return
-		}
-
-		c.JSON(http.StatusOK , group)
-	}
-}
