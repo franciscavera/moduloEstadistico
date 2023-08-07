@@ -2,7 +2,7 @@
   <div v-if="showModal" class="modal-container">
   
     <div class="modal-window">
-    <h1> Ayuda aclaración de conceptos...</h1>
+    <h1> Ayuda aclaración de conceptos......</h1>
     <p style="text-align: left;"><strong>  Correlación Lineal </strong></p>
     <p style="text-align: justify;">Cuando se emplea el análisis de correlación,
     es posible determinar si existe una relación entre las variables, así como
